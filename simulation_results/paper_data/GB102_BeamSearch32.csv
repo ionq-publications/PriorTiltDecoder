@@ -1,0 +1,9 @@
+shots,errors,discards,seconds,decoder,json_metadata,decoder_params
+400000000,39,0,32158564.5,BeamSearch32,"{""code"":""GB102"",""p_CNOT"":0.0005,""x_or_z"":""x"",""syndrome_rounds"":9}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+150000000,133,0,14842247.7,BeamSearch32,"{""code"":""GB102"",""p_CNOT"":0.0008,""x_or_z"":""x"",""syndrome_rounds"":9}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+50000000,118,0,12477825.9,BeamSearch32,"{""code"":""GB102"",""p_CNOT"":0.001,""x_or_z"":""x"",""syndrome_rounds"":9}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+3264366,402,0,839404.6,BeamSearch32,"{""code"":""GB102"",""p_CNOT"":0.002,""x_or_z"":""x"",""syndrome_rounds"":9}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+400000000,44,0,31545640.799999997,BeamSearch32,"{""code"":""GB102"",""p_CNOT"":0.0005,""x_or_z"":""z"",""syndrome_rounds"":9}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+150000000,125,0,14670620.4,BeamSearch32,"{""code"":""GB102"",""p_CNOT"":0.0008,""x_or_z"":""z"",""syndrome_rounds"":9}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+50000000,143,0,12426744.9,BeamSearch32,"{""code"":""GB102"",""p_CNOT"":0.001,""x_or_z"":""z"",""syndrome_rounds"":9}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+2994187,402,0,771408.8,BeamSearch32,"{""code"":""GB102"",""p_CNOT"":0.002,""x_or_z"":""z"",""syndrome_rounds"":9}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"

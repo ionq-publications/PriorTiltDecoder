@@ -1,0 +1,11 @@
+shots,errors,discards,seconds,decoder,json_metadata,decoder_params
+100000000,45,0,20150309.9,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.001,""x_or_z"":""x"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+16368185,500,0,3274414.3,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.002,""x_or_z"":""x"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+813258,503,0,207763.4,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.003,""x_or_z"":""x"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+67579,512,0,21386.8,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.004,""x_or_z"":""x"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+8010,557,0,6437.4,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.005,""x_or_z"":""x"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+100000000,33,0,18852766.1,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.001,""x_or_z"":""z"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+14389758,500,0,2946082.0,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.002,""x_or_z"":""z"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+715303,503,0,162999.6,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.003,""x_or_z"":""z"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+65322,543,0,20658.9,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.004,""x_or_z"":""z"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"
+8367,540,0,6311.7,BeamSearch32,"{""code"":""BB144"",""p_CNOT"":0.005,""x_or_z"":""z"",""syndrome_rounds"":12}","{""beam_width"":32,""initial_iters"":40,""iters_per_round"":30,""max_rounds"":10}"

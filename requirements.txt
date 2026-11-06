@@ -1,0 +1,15 @@
+# Build dependency of the Rust extension (plus a Rust toolchain, https://rustup.rs)
+maturin>=1.7,<2.0
+
+# Scientific stack
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+matplotlib>=3.5
+
+# Quantum
+stim>=1.12
+sinter>=1.12
+
+# Notebook
+jupyter

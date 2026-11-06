@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+decoder/target/
+*.so
+*.pyd
+*.egg-info/
+build/
+dist/
+.venv/
+simulation_results/temp_files/*
+!simulation_results/temp_files/.gitkeep
+.DS_Store
