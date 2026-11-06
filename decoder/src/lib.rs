@@ -8,28 +8,36 @@
 // You may obtain a copy of the License at:
 // https://creativecommons.org/licenses/by-nc-sa/4.0/
 
-//! PriorTilt: min-sum belief propagation with transient prior tilts (single-solution decoder), Rust core.
+//! PriorTilt: min-sum belief propagation with sparse perturbations of the prior LLRs, Rust core.
 //!
-//! Algorithm:
-//!   Phase 1: `initial_iters` iterations of parallel min-sum BP; return at once if the syndrome is satisfied.
-//!   Phase 2: BP continues without resetting messages, in rounds of `round_len` iterations, for at most
-//!     `max_rounds` rounds. Per bit, over a round: LLR_sums = sum of the posterior; run_min / run_max = min / max
-//!     over the posterior and all outgoing bit->check messages. At the end of a round, a bit with
-//!     LLR_sums < threshold_factor * init gets a prior offset for the next round:
-//!       with probability prob_positive:  +pos_coef * max(0, -run_min)
-//!       otherwise:                       -neg_coef * max(0,  run_max)
-//!     Offsets are overwritten every round. The first syndrome-consistent hard decision is returned.
-//!   Three-phase mode: `set_round_schedule` installs block boundaries and one (prob_positive, pos_coef,
-//!     neg_coef, threshold_factor) tuple per block; the tilt computed after `completed` finished tilt rounds
-//!     uses the block that contains `completed`.
+//! Algorithm (notation of the paper, Sec. "PriorTilt decoder"):
+//!   Stage 1: up to I_0 = `initial_iters` ordinary min-sum BP iterations; return as soon as the hard decision
+//!     satisfies the syndrome.
+//!   Stage 2: modified BP in rounds of r = `round_len` iterations, at most R = `max_rounds` rounds, without ever
+//!     resetting the messages. In round tau every error node j uses the effective prior Lambda_j + o_j(tau). Over
+//!     a round the decoder accumulates, per error node, S_j = sum of the posterior LLRs (`llr_sums`) and the
+//!     extrema M_j^- / M_j^+ of the posterior LLRs and outgoing error-to-detector messages (`run_min` /
+//!     `run_max`, clipped at 0). At the round boundary a node is *error-prone* if S_j < theta * Lambda_j
+//!     (theta = `threshold_factor`); only error-prone nodes get a nonzero offset for the next round,
+//!       o_j = -c_1 M_j^-  with probability pi      (nonnegative, favours no error; pi = `prob_positive`, c_1 = `pos_coef`)
+//!       o_j = -c_2 M_j^+  with probability 1 - pi  (nonpositive, favours the error hypothesis; c_2 = `neg_coef`).
+//!     Offsets replace the previous ones at every round boundary. The first syndrome-consistent hard decision is
+//!     returned; if the budget I_0 + r R is exhausted the last hard decision is returned with `converge` = false.
+//!   Parameter schedule: `set_round_schedule` installs the phase boundaries b_1 < b_2 < ... (`ends`) and one
+//!     parameter set Theta_h = (theta, pi, c_1, c_2) per phase; the offsets for round tau use Theta_1 for
+//!     tau <= b_1, Theta_2 for b_1 < tau <= b_2, and so on (two boundaries = the paper's three-phase mode, no
+//!     boundary = its uniform mode). Without a schedule the scalar constructor parameters apply to every round.
+//!   In the code the parameter tuples are ordered (prob_positive, pos_coef, neg_coef, threshold_factor) =
+//!     (pi, c_1, c_2, theta); the paper's tuples are ordered (theta, pi, c_1, c_2).
 //!
-//! Data layout: messages in two flat arrays indexed by edge id, edges numbered in column (bit) order so each
-//! bit's edges are contiguous; each check holds an index list (u32) of its edge ids. One fused pass per check
-//! and one fused pass per bit per iteration; hot loops use unchecked indexing on indices that are valid by
-//! construction.
+//! Data layout: messages in two flat arrays indexed by edge id, edges numbered in column (error node) order so
+//! each error node's edges are contiguous; each detector node holds an index list (u32) of its edge ids. One
+//! fused pass per detector node and one fused pass per error node per iteration; hot loops use unchecked
+//! indexing on indices that are valid by construction. In the code "bit" = error node (column of the check
+//! matrix) and "check" = detector node (row).
 //!
-//! Two Python classes: `PriorTiltDecoder` (f64 messages, same arithmetic as the C++) and `PriorTiltDecoderF32`
-//! (f32 messages: faster, results equal only statistically).
+//! Two Python classes: `PriorTiltDecoder` (f64 messages, the arithmetic used for the paper) and
+//! `PriorTiltDecoderF32` (f32 messages: faster, results equal only statistically).
 
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -101,8 +109,9 @@ macro_rules! make_core {
             run_max: Vec<$t>,
             decoding: Vec<u8>,
             cand_syn: Vec<u8>,
-            // round schedule (three-phase mode): block k covers completed rounds in [ends[k-1], ends[k]);
-            // the last tuple applies beyond the last end; empty = uniform mode
+            // parameter schedule (three-phase mode): phase k covers completed rounds in [ends[k-1], ends[k]),
+            // i.e. round tau uses phase k when ends[k-1] < tau <= ends[k]; the last phase applies beyond the last
+            // boundary; empty = uniform mode
             sched_ends: Vec<usize>,
             sched_ppos: Vec<f64>,
             sched_pos: Vec<f64>,
@@ -112,12 +121,12 @@ macro_rules! make_core {
             pub params: Params,
             pub seed: i64,
             pub iterations: usize,
-            pub tilt_rounds: usize,
+            pub rounds: usize,
             pub converged: bool,
-            // diagnostic counters, accumulated over decodes until reset_tilt_statistics():
-            pub stat_uncertain: u64,  // (bit, tilt round) pairs that received a nonzero prior offset
-            pub stat_bit_rounds: u64, // bits examined in those offset computations (= bit_count per tilt round)
-            pub stat_tilts: u64,      // offset computations (= tilt rounds)
+            // diagnostic counters, accumulated over decodes until reset_offset_statistics():
+            pub stat_error_prone: u64, // (error node, round) pairs satisfying the error-prone condition S_j < theta * Lambda_j
+            pub stat_node_rounds: u64, // (error node, round) pairs examined (= bit_count per modified-BP round)
+            pub stat_rounds: u64,      // offset computations (= modified-BP rounds)
         }
 
         impl $core {
@@ -174,11 +183,11 @@ macro_rules! make_core {
                     params,
                     seed,
                     iterations: 0,
-                    tilt_rounds: 0,
+                    rounds: 0,
                     converged: false,
-                    stat_uncertain: 0,
-                    stat_bit_rounds: 0,
-                    stat_tilts: 0,
+                    stat_error_prone: 0,
+                    stat_node_rounds: 0,
+                    stat_rounds: 0,
                 })
             }
 
@@ -195,7 +204,8 @@ macro_rules! make_core {
                 }
             }
 
-            /// One parallel min-sum iteration with each bit's prior shifted by offsets[i]. Returns true on convergence.
+            /// One parallel min-sum iteration with the effective prior init_llr[i] + offsets[i] at every error node.
+            /// Returns true when the hard decision satisfies the syndrome.
             ///
             /// Unchecked indexing: every index comes from `row_ptr`/`col_ptr`/`row_edges`/`edge_row`, built in the
             /// constructor from a valid CSC structure; `syndrome.len() == check_count` is verified by the caller.
@@ -316,8 +326,8 @@ macro_rules! make_core {
                 false
             }
 
-            /// Tilt for the round that follows `completed` completed tilt rounds: the schedule block containing
-            /// `completed` in three-phase mode, the scalar parameters otherwise.
+            /// Prior offsets for the round that follows `completed` finished modified-BP rounds: the schedule phase
+            /// containing round `completed` + 1 in three-phase mode, the scalar parameters in uniform mode.
             fn compute_offsets(&mut self, completed: usize) {
                 if !self.sched_ppos.is_empty() {
                     let mut k = 0usize;
@@ -337,12 +347,12 @@ macro_rules! make_core {
                 let neg = (neg_coef as $t);
                 let pos = (pos_coef as $t);
                 let zero = (0.0 as $t);
-                self.stat_tilts += 1;
-                self.stat_bit_rounds += self.bit_count as u64;
+                self.stat_rounds += 1;
+                self.stat_node_rounds += self.bit_count as u64;
                 for i in 0..self.bit_count {
                     let init = self.init_llr[i];
                     if self.llr_sums[i] < thr * init {
-                        self.stat_uncertain += 1;
+                        self.stat_error_prone += 1;
                         let u: f64 = self.rng.gen();
                         self.offsets[i] = if u < p_pos {
                             pos * (-self.run_min[i]).max(zero)
@@ -358,7 +368,7 @@ macro_rules! make_core {
             fn decode(&mut self, syndrome: &[u8]) -> &[u8] {
                 self.converged = false;
                 self.iterations = 0;
-                self.tilt_rounds = 0;
+                self.rounds = 0;
                 let p = self.params;
                 for i in 0..self.bit_count {
                     let init = self.init_llr[i];
@@ -368,7 +378,7 @@ macro_rules! make_core {
                     self.offsets[i] = (0.0 as $t);
                 }
                 self.reset_round_stats();
-                // ---------------- phase 1: standard BP ----------------
+                // ---------------- stage 1: ordinary BP (I_0 iterations) ----------------
                 for it in 1..=p.initial_iters {
                     if it + p.round_len == p.initial_iters + 1 {
                         self.reset_round_stats();
@@ -379,17 +389,20 @@ macro_rules! make_core {
                 }
                 let mut completed = 0usize;
                 self.compute_offsets(completed);
-                // ---------------- phase 2: rounds with prior offsets ----------------
+                // ---------------- stage 2: modified BP in rounds of r iterations ----------------
                 for _round in 0..p.max_rounds {
                     completed += 1;
-                    self.tilt_rounds = completed;
+                    self.rounds = completed;
                     self.reset_round_stats();
                     for _k in 1..=p.round_len {
                         if self.bp_iteration(syndrome) {
                             return &self.decoding;
                         }
                     }
-                    self.compute_offsets(completed);
+                    // offsets (and their diagnostic counters) only for a round that will actually run
+                    if completed < p.max_rounds {
+                        self.compute_offsets(completed);
+                    }
                 }
                 &self.decoding
             }
@@ -434,15 +447,16 @@ macro_rules! make_pyclass {
             #[getter] fn bit_count(&self) -> usize { self.core.bit_count }
             /// BP iterations of the last decode.
             #[getter] fn iterations(&self) -> usize { self.core.iterations }
-            /// Tilt rounds completed in the last decode.
-            #[getter] fn tilt_rounds(&self) -> usize { self.core.tilt_rounds }
+            /// Modified-BP rounds completed in the last decode.
+            #[getter] fn rounds(&self) -> usize { self.core.rounds }
             /// Whether the last decode reached a syndrome-consistent solution.
             #[getter] fn converge(&self) -> bool { self.core.converged }
-            /// Diagnostic counters accumulated since the last reset: (number of (bit, tilt round) pairs that received
-            /// a nonzero prior offset, number of (bit, tilt round) pairs examined, number of tilt rounds). Their ratio
-            /// is the fraction of bits with a nonzero offset per tilt round.
-            fn tilt_statistics(&self) -> (u64, u64, u64) { (self.core.stat_uncertain, self.core.stat_bit_rounds, self.core.stat_tilts) }
-            fn reset_tilt_statistics(&mut self) { self.core.stat_uncertain = 0; self.core.stat_bit_rounds = 0; self.core.stat_tilts = 0; }
+            /// Diagnostic counters accumulated since the last reset: (number of (error node, round) pairs that
+            /// satisfied the error-prone condition S_j < theta * Lambda_j, number of (error node, round) pairs examined,
+            /// number of modified-BP rounds). The ratio of the first two is the mean fraction of error-prone nodes per
+            /// round, the quantity tabulated in the paper; it bounds the fraction of nonzero prior offsets from above.
+            fn offset_statistics(&self) -> (u64, u64, u64) { (self.core.stat_error_prone, self.core.stat_node_rounds, self.core.stat_rounds) }
+            fn reset_offset_statistics(&mut self) { self.core.stat_error_prone = 0; self.core.stat_node_rounds = 0; self.core.stat_rounds = 0; }
             #[getter] fn seed(&self) -> i64 { self.core.seed }
             #[setter] fn set_seed(&mut self, v: i64) { self.core.reseed(v) }
             #[getter] fn initial_iters(&self) -> usize { self.core.params.initial_iters }
@@ -465,7 +479,7 @@ macro_rules! make_pyclass {
                 PyArray1::from_vec(py, self.core.post.iter().map(|&v| v as f64).collect())
             }
 
-            /// Decode one syndrome (uint8, length check_count); returns the error estimate (uint8, bit_count).
+            /// Decode one syndrome (uint8, length check_count); returns the estimated error vector (uint8, bit_count).
             fn decode<'py>(&mut self, py: Python<'py>, detectors: PyReadonlyArray1<'_, u8>) -> PyResult<Bound<'py, PyArray1<u8>>> {
                 let syn = detectors.as_slice()?;
                 if syn.len() != self.core.check_count {
@@ -493,10 +507,10 @@ macro_rules! make_pyclass {
                 Ok(PyArray1::from_vec(py, flat).reshape([shots, n])?)
             }
 
-            /// Block schedule of tilt parameters (three-phase mode): `ends` = strictly increasing positive block end
-            /// rounds (completed tilt rounds); value k of each parameter applies to the tilts computed after a number of
-            /// completed rounds in [ends[k-1], ends[k]), the last value beyond the last end (len = len(ends) + 1).
-            /// Overrides the scalar parameters. clear_round_schedule() returns to the uniform mode.
+            /// Parameter schedule of the three-phase mode: `ends` = the phase boundaries (b_1, b_2, ...), strictly
+            /// increasing positive round indices; value k of each parameter applies to rounds tau with
+            /// ends[k-1] < tau <= ends[k], the last value beyond the last boundary (len = len(ends) + 1). Overrides the
+            /// scalar parameters. clear_round_schedule() returns to the uniform mode.
             fn set_round_schedule(&mut self, ends: PyReadonlyArray1<'_, i64>, prob_positive: PyReadonlyArray1<'_, f64>, pos_coef: PyReadonlyArray1<'_, f64>, neg_coef: PyReadonlyArray1<'_, f64>, threshold_factor: PyReadonlyArray1<'_, f64>) -> PyResult<()> {
                 let e = ends.as_slice()?;
                 let (a, b, c, d) = (prob_positive.as_slice()?, pos_coef.as_slice()?, neg_coef.as_slice()?, threshold_factor.as_slice()?);

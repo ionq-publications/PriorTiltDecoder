@@ -8,14 +8,24 @@
 # You may obtain a copy of the License at:
 # https://creativecommons.org/licenses/by-nc-sa/4.0/
 
-"""PriorTilt: min-sum belief propagation with transient prior tilts, for circuit-level decoding of qLDPC codes.
+"""PriorTilt: min-sum belief propagation with sparse perturbations of the prior log-likelihood ratios, for
+circuit-level decoding of quantum LDPC codes.
 
-Single-solution decoder with a Rust core (``decoder/``, Python module ``priortilt_rs``). Two operating modes:
+The decoder runs up to 60 ordinary min-sum BP iterations and then continues, without resetting its messages,
+with modified BP in rounds of six iterations, for at most ``max_rounds`` rounds. At every round boundary the
+error nodes that are *error-prone* (posterior LLR sum over the round below ``threshold_factor`` times the prior
+LLR) receive a randomized prior offset for the next round; all other nodes keep their original prior. The first
+syndrome-consistent hard decision is returned. Rust core in ``decoder/`` (Python module ``priortilt_rs``).
 
-* **three-phase** (the paper's decoder): a schedule of two round boundaries and one parameter tuple per block;
-* **uniform**: one parameter tuple for every tilt round.
+All results of the paper use the three-phase mode: the offset parameters change at two phase boundaries, one
+(prob_positive, pos_coef, neg_coef, threshold_factor) tuple per phase (a ``schedule``). The paper's uniform mode
+is the special case of a schedule with a single phase and no boundaries.
 
-Typical use, with the optimised parameters of one of the paper's codes::
+Parameter names versus the paper's notation: ``threshold_factor`` = theta, ``prob_positive`` = pi,
+``pos_coef`` = c_1, ``neg_coef`` = c_2; the code orders a tuple as (pi, c_1, c_2, theta), the paper as
+(theta, pi, c_1, c_2). The phase boundaries (b_1, b_2) are the ``ends`` of a schedule.
+
+Typical use, with the optimized parameters of one of the paper's codes::
 
     import stim
     from priortilt import PriorTilt
@@ -27,11 +37,11 @@ Typical use, with the optimised parameters of one of the paper's codes::
     predictions = dec.decode_batch(dets)                      # bool array, shots x observables
     print((predictions != obs).any(axis=1).sum(), "logical failures")
 
-The physical error rate ``p`` is the two-qubit gate error rate of the circuit; it is matched to the closest fitted
-rate. For a code without recorded parameters pass the parameters explicitly (after tuning them)::
+The physical error rate ``p`` is matched to the closest rate with optimized parameters. For a code without
+recorded parameters pass a schedule explicitly (after optimizing it)::
 
-    dec = PriorTilt(dem, prob_positive=0.1, pos_coef=0.5, neg_coef=0.8, threshold_factor=2.0)
-    dec = PriorTilt(dem, schedule={"ends": [100, 800], "phases": [[...], [...], [...]]})
+    dec = PriorTilt(dem, schedule={"ends": [100, 800], "phases": [[...], [...], [...]]})   # three-phase mode
+    dec = PriorTilt(dem, schedule={"ends": [], "phases": [[0.1, 0.5, 0.8, 2.0]]})         # uniform mode
 """
 
 from __future__ import annotations
@@ -50,9 +60,7 @@ from priortilt.params import (
     DEFAULT_INITIAL_ITERS,
     DEFAULT_MAX_ROUNDS,
     DEFAULT_ROUND_LEN,
-    PARAM_NAMES,
     THREE_PHASE_SCHEDULES,
-    UNIFORM_PARAMS,
     PriorTiltConfig,
     UntunedCodeError,
     tuned_config,
@@ -63,7 +71,6 @@ __all__ = [
     "PriorTiltConfig",
     "UntunedCodeError",
     "CODES",
-    "UNIFORM_PARAMS",
     "THREE_PHASE_SCHEDULES",
     "tuned_config",
     "dem_to_matrices",
@@ -91,27 +98,22 @@ def _core_class(precision: str):
 
 
 def _create_core(precision: str, pcm, priors, cfg: PriorTiltConfig, seed: int):
+    ends, ppos, pos, neg, thr = cfg.schedule_arrays()
     core = _core_class(precision)(
         scipy.sparse.csc_matrix(pcm),
         np.asarray(priors, dtype=np.float64),
         initial_iters=int(cfg.initial_iters),
         round_len=int(cfg.round_len),
         max_rounds=int(cfg.max_rounds),
-        threshold_factor=float(cfg.threshold_factor),
-        neg_coef=float(cfg.neg_coef),
-        pos_coef=float(cfg.pos_coef),
-        prob_positive=float(cfg.prob_positive),
         seed=int(seed),
     )
-    if cfg.mode == "three_phase":
-        ends, ppos, pos, neg, thr = cfg.schedule_arrays()
-        core.set_round_schedule(
-            np.asarray(ends, dtype=np.int64),
-            np.asarray(ppos, dtype=np.float64),
-            np.asarray(pos, dtype=np.float64),
-            np.asarray(neg, dtype=np.float64),
-            np.asarray(thr, dtype=np.float64),
-        )
+    core.set_round_schedule(
+        np.asarray(ends, dtype=np.int64),
+        np.asarray(ppos, dtype=np.float64),
+        np.asarray(pos, dtype=np.float64),
+        np.asarray(neg, dtype=np.float64),
+        np.asarray(thr, dtype=np.float64),
+    )
     return core
 
 
@@ -124,28 +126,25 @@ class PriorTilt:
         The detector error model of the circuit to decode (``circuit.detector_error_model()``; the decoder handles
         undecomposed hyperedges, so ``decompose_errors`` is not needed).
     code : str or int, optional
-        Code whose optimised parameters to use ("BB144", "BB70", "GB102", any case, or the number of physical
+        Code whose optimized parameters to use ("BB144", "BB70", "GB102", any case, or the number of physical
         qubits). Requires ``p``. Other codes raise ``UntunedCodeError``.
     p : float, optional
-        Physical (two-qubit gate) error rate of the circuit; the closest fitted rate is used (a warning is emitted
-        outside the fitted range).
-    mode : {"auto", "three_phase", "uniform"}
-        Operating mode. "auto" (default) is three-phase (the paper's decoder) with ``code`` or ``schedule`` and
-        uniform with explicit scalar parameters.
-    prob_positive, pos_coef, neg_coef, threshold_factor : float, optional
-        Explicit uniform-mode tilt parameters. Without ``code`` all four are required; with ``code`` they override
-        the looked-up values (uniform mode only).
+        Physical error rate of the circuit; the closest rate with optimized parameters is used (a warning is
+        emitted outside the optimized range).
     schedule : dict, optional
-        Explicit three-phase schedule ``{"ends": [b1, b2, ...], "phases": [[prob_positive, pos_coef, neg_coef,
-        threshold_factor], ...]}`` with ``len(phases) == len(ends) + 1``. Mutually exclusive with ``code``.
+        Explicit parameter schedule ``{"ends": [b1, b2, ...], "phases": [[prob_positive, pos_coef, neg_coef,
+        threshold_factor], ...]}`` with ``len(phases) == len(ends) + 1``: phase k applies to rounds
+        ``ends[k-1] < tau <= ends[k]`` (two boundaries and three tuples = the paper's three-phase mode; no boundary
+        and one tuple = the uniform mode). Mutually exclusive with ``code``.
     max_rounds : int
-        Tilt-round budget (default 3000, the paper's setting; each round is ``round_len`` BP iterations). A larger
-        budget lowers the logical error rate at low noise and barely changes the mean decoding time.
+        Maximum number R of modified-BP rounds (default 3000, the paper's setting for standard XZ decoding; the
+        total budget is ``initial_iters + round_len * max_rounds`` BP iterations). A larger budget lowers the
+        logical error rate at low physical error rates and barely changes the mean decoding time.
     initial_iters, round_len : int
-        Plain BP iterations before the tilt rounds (60) and iterations per tilt round (6). The optimised
-        parameters assume these values.
+        Ordinary BP iterations before the modified-BP rounds (I_0 = 60) and iterations per round (r = 6). The
+        optimized parameters assume these values.
     seed : int
-        Seed of the kick-direction generator; negative (default) = nondeterministic.
+        Seed of the random sign choice of the prior offsets; negative (default) = nondeterministic.
     precision : {"f64", "f32"}
         Message precision ("f32" is faster and statistically equivalent; the paper used "f64").
     """
@@ -156,11 +155,6 @@ class PriorTilt:
         *,
         code: Optional[Union[str, int]] = None,
         p: Optional[float] = None,
-        mode: str = "auto",
-        prob_positive: Optional[float] = None,
-        pos_coef: Optional[float] = None,
-        neg_coef: Optional[float] = None,
-        threshold_factor: Optional[float] = None,
         schedule: Optional[Dict[str, object]] = None,
         max_rounds: int = DEFAULT_MAX_ROUNDS,
         initial_iters: int = DEFAULT_INITIAL_ITERS,
@@ -168,16 +162,7 @@ class PriorTilt:
         seed: int = -1,
         precision: str = "f64",
     ):
-        explicit = {
-            k: v
-            for k, v in dict(
-                prob_positive=prob_positive, pos_coef=pos_coef, neg_coef=neg_coef, threshold_factor=threshold_factor
-            ).items()
-            if v is not None
-        }
-        self.config = self._resolve_config(
-            code, p, mode, explicit, schedule, max_rounds=max_rounds, initial_iters=initial_iters, round_len=round_len
-        )
+        self.config = self._resolve_config(code, p, schedule, max_rounds=max_rounds, initial_iters=initial_iters, round_len=round_len)
         self._matrices = dem_to_matrices(model)
         self.num_detectors = model.num_detectors
         self.num_observables = model.num_observables
@@ -189,19 +174,11 @@ class PriorTilt:
     # ------------------------------------------------------------------ configuration
 
     @staticmethod
-    def _resolve_config(code, p, mode, explicit, schedule, *, max_rounds, initial_iters, round_len) -> PriorTiltConfig:
+    def _resolve_config(code, p, schedule, *, max_rounds, initial_iters, round_len) -> PriorTiltConfig:
         if schedule is not None:
-            if code is not None or explicit:
-                raise TypeError("schedule= is an explicit configuration; do not combine it with code= or scalar parameters")
-            if mode not in ("auto", "three_phase"):
-                raise ValueError("an explicit schedule implies mode='three_phase'")
-            first = list(schedule["phases"][0])
+            if code is not None:
+                raise TypeError("schedule= is an explicit configuration; do not combine it with code=")
             cfg = PriorTiltConfig(
-                mode="three_phase",
-                prob_positive=float(first[0]),
-                pos_coef=float(first[1]),
-                neg_coef=float(first[2]),
-                threshold_factor=float(first[3]),
                 schedule={
                     "ends": [int(e) for e in schedule["ends"]],
                     "phases": [list(map(float, t)) for t in schedule["phases"]],
@@ -212,36 +189,15 @@ class PriorTilt:
             )
             cfg.validate()
             return cfg
-        if code is not None:
-            if p is None:
-                raise TypeError("p (physical error rate) is required together with code")
-            return tuned_config(code, p, mode, max_rounds=max_rounds, initial_iters=initial_iters, round_len=round_len, **explicit)
-        missing = [k for k in PARAM_NAMES if k not in explicit]
-        if missing:
+        if code is None:
             raise UntunedCodeError(
-                "PriorTilt needs either code= and p= (optimised parameters of one of the paper's codes) or all four "
-                f"tilt parameters {PARAM_NAMES} (missing {missing}) or a schedule=. Its logical error rate depends "
-                "strongly on these parameters: tune them for your code and noise model before use. Codes with "
-                f"recorded parameters: {', '.join(CODES)}."
+                "PriorTilt needs either code= and p= (the paper's optimized parameters of one of its codes) or an explicit "
+                "schedule=. Its logical error rate depends strongly on the offset parameters: optimize them for your code "
+                f"and noise model before use. Codes with recorded parameters: {', '.join(CODES)}."
             )
-        if mode not in ("auto", "uniform"):
-            raise ValueError("explicit scalar parameters imply mode='uniform'")
-        cfg = PriorTiltConfig(
-            mode="uniform",
-            prob_positive=float(explicit["prob_positive"]),
-            pos_coef=float(explicit["pos_coef"]),
-            neg_coef=float(explicit["neg_coef"]),
-            threshold_factor=float(explicit["threshold_factor"]),
-            max_rounds=max_rounds,
-            initial_iters=initial_iters,
-            round_len=round_len,
-        )
-        cfg.validate()
-        return cfg
-
-    @property
-    def mode(self) -> str:
-        return self.config.mode
+        if p is None:
+            raise TypeError("p (physical error rate) is required together with code")
+        return tuned_config(code, p, max_rounds=max_rounds, initial_iters=initial_iters, round_len=round_len)
 
     @property
     def precision(self) -> str:
@@ -299,24 +255,27 @@ class PriorTilt:
         return int(self._core.iterations)
 
     @property
-    def tilt_rounds(self) -> int:
-        """Tilt rounds completed in the last single-shot decode."""
-        return int(self._core.tilt_rounds)
+    def rounds(self) -> int:
+        """Modified-BP rounds completed in the last single-shot decode."""
+        return int(self._core.rounds)
 
-    def tilt_statistics(self) -> dict:
-        """Diagnostic counters accumulated over all decodes since the last reset_tilt_statistics():
-        `nonzero_offsets` = number of (bit, tilt round) pairs that received a nonzero prior offset,
-        `bit_rounds` = number of (bit, tilt round) pairs examined (= num_errors per tilt round),
-        `tilt_rounds` = number of tilt rounds. nonzero_offsets / bit_rounds is the fraction of bits with a
-        nonzero offset per tilt round (the quantity tabulated in the paper)."""
-        u, b, t = self._core.tilt_statistics()
-        return {"nonzero_offsets": int(u), "bit_rounds": int(b), "tilt_rounds": int(t)}
+    def offset_statistics(self) -> dict:
+        """Diagnostic counters accumulated over all decodes since the last reset_offset_statistics():
+        `error_prone_nodes` = number of (error node, round) pairs that satisfied the error-prone condition
+        S_j < theta * Lambda_j (only these nodes receive a nonzero prior offset),
+        `node_rounds` = number of (error node, round) pairs examined (= num_errors per modified-BP round),
+        `rounds` = number of modified-BP rounds. error_prone_nodes / node_rounds is the mean fraction of
+        error-prone nodes per round, the quantity tabulated in the paper; it bounds the fraction of nonzero prior
+        offsets from above."""
+        u, b, t = self._core.offset_statistics()
+        return {"error_prone_nodes": int(u), "node_rounds": int(b), "rounds": int(t)}
 
-    def reset_tilt_statistics(self) -> None:
-        self._core.reset_tilt_statistics()
+    def reset_offset_statistics(self) -> None:
+        self._core.reset_offset_statistics()
 
     def decode_errors(self, syndrome: np.ndarray) -> np.ndarray:
-        """Error-mechanism estimate (uint8, length num_errors) for one shot of detector data."""
+        """Estimated error vector (uint8, length num_errors, one entry per error mechanism) for one shot of
+        detector data."""
         syn = np.ascontiguousarray(syndrome, dtype=np.uint8)
         if syn.ndim != 1 or syn.shape[0] != self.num_detectors:
             raise ValueError(f"syndrome must have shape ({self.num_detectors},), got {syn.shape}")

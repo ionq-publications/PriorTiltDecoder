@@ -1,4 +1,4 @@
-code,basis,p,syndrome_rounds,shots,num_error_mechanisms,shots_reaching_tilt_phase,tilt_rounds,nonzero_offsets,offset_fraction,per_shot_p90,per_shot_max,failures,decoder
+code,basis,p,syndrome_rounds,shots,num_error_mechanisms,shots_reaching_modified_bp,rounds,error_prone_nodes,offset_fraction,per_shot_p90,per_shot_max,failures,decoder
 BB144,x,0.001,12,100000,8784,736,4734,80884,0.0019451004745733495,0.002574282786885246,0.006306921675774135,0,PriorTilt_3phase
 BB144,z,0.001,12,100000,8784,859,5322,90552,0.0019370054809092273,0.0026197364191578275,0.007536429872495446,0,PriorTilt_3phase
 BB144,x,0.002,12,30000,8784,1458,25106,743644,0.003372059480552911,0.003958004587826189,0.010796144505160898,2,PriorTilt_3phase

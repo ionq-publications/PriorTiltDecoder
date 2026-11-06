@@ -8,7 +8,9 @@
 # You may obtain a copy of the License at:
 # https://creativecommons.org/licenses/by-nc-sa/4.0/
 
-"""Conversion of a stim DetectorErrorModel into the matrices the decoder works on.
+"""Conversion of a stim DetectorErrorModel into the matrices the decoder works on: the parity-check matrix H
+(detectors x error mechanisms), the logical operator matrix A (logical observables x error mechanisms) and the
+error probabilities p_j of the mechanisms, in the paper's notation.
 
 Every ``error`` instruction of the (flattened) model is one error mechanism. Mechanisms with the same set of
 detectors are merged into one column: their probabilities combine as independent events
@@ -28,9 +30,9 @@ from scipy.sparse import csc_matrix
 
 @dataclass
 class DemMatrices:
-    check_matrix: csc_matrix  # detectors x mechanisms (uint8)
-    observables_matrix: csc_matrix  # observables x mechanisms (uint8)
-    priors: np.ndarray  # probability of each mechanism (float64)
+    check_matrix: csc_matrix  # H: detectors x error mechanisms (uint8)
+    observables_matrix: csc_matrix  # A: logical observables x error mechanisms (uint8)
+    priors: np.ndarray  # p_j: probability of each error mechanism (float64)
 
 
 def _xor_of_groups(groups: List[List[int]]) -> FrozenSet[int]:

@@ -11,9 +11,14 @@
 """Helper functions used by PriorTilt.ipynb: load the paper's circuits and data, plot the paper's figure, and
 re-simulate the PriorTilt points with sinter.
 
-Paper setting reproduced here: PriorTilt in the three-phase mode (one solution, 60 plain BP iterations, tilt
-rounds of 6 iterations, at most 3000 tilt rounds, the schedule fitted at each (code, noise rate)), standard X and
-Z memory experiments, logical error rate per syndrome extraction cycle = (failures / shots) / syndrome_rounds.
+Paper setting reproduced here: PriorTilt in the three-phase mode (I_0 = 60 ordinary BP iterations, then modified-BP
+rounds of r = 6 iterations, at most R = 3000 rounds, the parameters optimized for each code and physical error rate,
+returning the first syndrome-consistent solution), standard XZ decoding of the X- and Z-memory experiments, and the
+logical error rate (LER) per syndrome extraction cycle = (logical errors / shots) / cycles. The paper reports the sum
+of the X- and Z-memory LERs.
+
+Naming: the physical error rate p of the paper is the argument `p_CNOT` of the functions below (and the key in the
+data files); the number of syndrome extraction cycles is `syndrome_rounds` in the circuit file names and data files.
 """
 
 from __future__ import annotations
@@ -41,16 +46,17 @@ PAPER_DATA_DIR = ROOT / "simulation_results" / "paper_data"
 RESULTS_DIR = ROOT / "simulation_results"
 TEMP_DIR = RESULTS_DIR / "temp_files"
 
-# The three codes of the paper's figure: family, [[n, k, d]], syndrome rounds of the memory experiment, noise rates.
+# The three codes of the paper: family, [[n, k, d]], syndrome extraction cycles of the memory experiment, physical error rates.
 CODES: Dict[str, dict] = {
     "BB144": dict(family="BB", n=144, k=12, d=12, syndrome_rounds=12, rates=[0.001, 0.002, 0.003, 0.004, 0.005],
-                  title="BB [[144,12,12]], 12 cycles"),
+                  title="BB144 [[144,12,12]], 12 cycles"),
     "BB70": dict(family="BB", n=70, k=6, d=9, syndrome_rounds=9, rates=[0.0005, 0.0008, 0.001, 0.002],
-                 title="BB [[70,6,9]], 9 cycles"),
+                 title="BB70 [[70,6,9]], 9 cycles"),
     "GB102": dict(family="GB", n=102, k=22, d=9, syndrome_rounds=9, rates=[0.0005, 0.0008, 0.001, 0.002],
-                  title="GB [[102,22,9]], 9 cycles"),
+                  title="GB102 [[102,22,9]], 9 cycles"),
 }
-DECODER_LABELS = {"PriorTilt_3phase": "PriorTilt (3-phase)", "RelayBP": "Relay-BP", "BeamSearch32": "beam search (beam32_340iters)"}
+DECODER_LABELS = {"PriorTilt_3phase": "PriorTilt", "RelayBP": "Relay-BP", "BeamSearch32": "beam search"}
+XYZ_LABELS = {"PriorTilt_3phase": "PriorTilt", "RelayBP-5": "Relay-BP-5"}
 DECODER_STYLES = {
     "PriorTilt_3phase": dict(ls="-", color="C0", marker="o"),
     "RelayBP": dict(ls="--", color="C1", marker="s"),
@@ -76,14 +82,14 @@ def _closest_listed_rate(code: str, p: float) -> float:
     for r in rates:
         if abs(r - p) <= 1e-9 * max(1.0, r):
             return r
-    raise ValueError(f"no circuit for {code} at p_CNOT={p:g}; available rates: {rates}")
+    raise ValueError(f"no circuit for {code} at physical error rate p_CNOT={p:g}; available rates: {rates}")
 
 
 # ----------------------------------------------------------------------------------------------- circuits
 
 
 def circuit_file(code, p_CNOT: float, x_or_z: str) -> Path:
-    """Path of the stim circuit of the memory experiment (code, p_CNOT, basis "x" or "z")."""
+    """Path of the Stim circuit of the X- or Z-memory experiment of `code` at physical error rate `p_CNOT` (x_or_z "x" or "z")."""
     name = _code_name(code)
     c = CODES[name]
     p = _closest_listed_rate(name, p_CNOT)
@@ -93,7 +99,7 @@ def circuit_file(code, p_CNOT: float, x_or_z: str) -> Path:
 
 
 def load_circuit(code, p_CNOT: float, x_or_z: str) -> stim.Circuit:
-    """The noisy stim circuit of the memory experiment (code, p_CNOT, basis)."""
+    """The noisy Stim circuit of the X- or Z-memory experiment of `code` at physical error rate `p_CNOT`."""
     return stim.Circuit.from_file(str(circuit_file(code, p_CNOT, x_or_z)))
 
 
@@ -106,26 +112,30 @@ def list_circuits() -> pd.DataFrame:
 
 
 def priortilt_decoder(code, p_CNOT: float, max_rounds: int = 3000, precision: str = "f64", seed: int = -1) -> SinterDecoder_PriorTilt:
-    """sinter decoder: PriorTilt three-phase mode with the schedule fitted for (code, p_CNOT); 3000 rounds = paper."""
-    return SinterDecoder_PriorTilt(code=_code_name(code), p=p_CNOT, mode="three_phase", max_rounds=max_rounds, precision=precision, seed=seed)
+    """sinter decoder: PriorTilt in the three-phase mode with the parameters optimized for (code, p_CNOT); at most
+    R = 3000 modified-BP rounds as in the paper."""
+    return SinterDecoder_PriorTilt(code=_code_name(code), p=p_CNOT, max_rounds=max_rounds, precision=precision, seed=seed)
 
 
-def decoder_name(code, p_CNOT: float) -> str:
-    return f"PriorTilt_3phase_{_code_name(code)}_p{p_CNOT:g}"
+def decoder_name(code, p_CNOT: float, max_rounds: int = 3000) -> str:
+    """Name of the sinter decoder for (code, p_CNOT); a non-default maximum number of rounds is part of the name (and
+    of the task identity), so runs with different budgets are never pooled."""
+    base = f"PriorTilt_3phase_{_code_name(code)}_p{p_CNOT:g}"
+    return base if max_rounds == 3000 else f"{base}_r{max_rounds}"
 
 
 def decoder_dictionary(code) -> Dict[str, SinterDecoder_PriorTilt]:
-    """One configured sinter decoder per noise rate of `code` (the parameters depend on the rate)."""
+    """One configured sinter decoder per physical error rate of `code` (the optimized parameters depend on the rate)."""
     name = _code_name(code)
     return {decoder_name(name, p): priortilt_decoder(name, p) for p in CODES[name]["rates"]}
 
 
-def _metadata(code: str, p: float, x_or_z: str) -> dict:
-    return {"code": code, "p_CNOT": p, "x_or_z": x_or_z, "syndrome_rounds": CODES[code]["syndrome_rounds"]}
+def _metadata(code: str, p: float, x_or_z: str, max_rounds: int = 3000) -> dict:
+    return {"code": code, "p_CNOT": p, "x_or_z": x_or_z, "syndrome_rounds": CODES[code]["syndrome_rounds"], "max_rounds": max_rounds}
 
 
 def _params_json(code: str, p: float, max_rounds: int = 3000) -> str:
-    return json.dumps(tuned_config(code, p, "three_phase", max_rounds=max_rounds).as_dict(), separators=(",", ":"))
+    return json.dumps(tuned_config(code, p, max_rounds=max_rounds).as_dict(), separators=(",", ":"))
 
 
 # ----------------------------------------------------------------------------------------------- paper data
@@ -172,7 +182,7 @@ def load_sinter_csv(path, decoder_label: Optional[str] = None) -> pd.DataFrame:
 
 
 def _sum_xz(df: pd.DataFrame) -> pd.DataFrame:
-    """x + z logical error rate per cycle per (decoder, p); only points with both bases."""
+    """Sum of the X- and Z-memory LERs per cycle per (decoder, p), the LER the paper reports; only points with both bases."""
     g = df.groupby(["decoder", "p"], as_index=False).agg(
         ler=("ler_per_cycle", "sum"), var=("ler_err_1sigma", lambda v: float((v**2).sum())), n=("basis", "count"), errors=("errors", "sum")
     )
@@ -197,8 +207,9 @@ def _style_axis(ax, code: str, rates: Iterable[float], first: bool):
 
 
 def plot_logical_error_rate(code, sum_xz: bool = True, ax=None, own_results: bool = True, show_table: bool = True):
-    """Logical error rate per cycle vs p_CNOT for one code: PriorTilt (3-phase), Relay-BP and beam search from the
-    paper's data. sum_xz=True draws one curve per decoder (x + z); False draws x (circles) and z (squares) separately.
+    """Logical error rate per cycle vs physical error rate for one code: PriorTilt (three-phase mode), Relay-BP and
+    beam search from the paper's data. sum_xz=True draws one curve per decoder (the sum of the X- and Z-memory LERs,
+    as in the paper); False draws the X-memory (circles) and Z-memory (squares) LERs separately.
     own_results=True also draws the points of your own full_simulation(code) run (hollow black markers) when the file
     simulation_results/<code>_PriorTilt_3phase.csv exists. Returns the DataFrame of the rows drawn."""
     name = _code_name(code)
@@ -217,18 +228,18 @@ def plot_logical_error_rate(code, sum_xz: bool = True, ax=None, own_results: boo
             for xz, mk in (("x", "o"), ("z", "s")):
                 s = sub[sub.basis == xz]
                 st["marker"] = mk
-                ax.errorbar(s.p, s.ler_per_cycle, yerr=s.ler_err_1sigma, ms=5, capsize=2, label=f"{DECODER_LABELS[dec]}, {xz} memory", **st)
+                ax.errorbar(s.p, s.ler_per_cycle, yerr=s.ler_err_1sigma, ms=5, capsize=2, label=f"{DECODER_LABELS[dec]}, {xz.upper()}-memory", **st)
     own_file = RESULTS_DIR / f"{name}_PriorTilt_3phase.csv"
     if own_results and own_file.exists():
-        mine = load_sinter_csv(own_file, decoder_label="PriorTilt_3phase")
+        mine = load_sinter_csv(own_file)  # decoder names are per (p_CNOT, max_rounds): different budgets stay separate
         mine = mine[mine.errors > 0]
         if sum_xz:
             g = _sum_xz(mine)
-            ax.errorbar(g.p, g.ler, yerr=g.err, fmt="D", mfc="none", color="k", ms=7, capsize=2, label="PriorTilt (3-phase), your run")
+            ax.errorbar(g.p, g.ler, yerr=g.err, fmt="D", mfc="none", color="k", ms=7, capsize=2, label="PriorTilt, your run")
         else:
             for xz, mk in (("x", "o"), ("z", "s")):
                 s = mine[mine.basis == xz]
-                ax.errorbar(s.p, s.ler_per_cycle, yerr=s.ler_err_1sigma, fmt=mk, mfc="none", color="k", ms=8, capsize=2, label=f"your run, {xz} memory")
+                ax.errorbar(s.p, s.ler_per_cycle, yerr=s.ler_err_1sigma, fmt=mk, mfc="none", color="k", ms=8, capsize=2, label=f"your run, {xz.upper()}-memory")
     _style_axis(ax, name, df.p, first=True)
     if show_table:
         print_table(name)
@@ -250,11 +261,12 @@ def plot_paper_figure(sum_xz: bool = True, own_results: bool = False, savefig: O
 
 
 def print_table(code):
-    """Per-basis and x+z logical error rates of the three decoders with the PriorTilt / Relay-BP and PriorTilt / beam ratios."""
+    """LER per cycle of the three decoders for the X- and Z-memory experiments and their sum (the paper's LER), with the
+    PriorTilt / Relay-BP and PriorTilt / beam-search ratios and the logical error counts."""
     name = _code_name(code)
     df = load_paper_data(name)
-    print(f"\n{CODES[name]['title']}: LER per cycle (PriorTilt 3-phase / Relay-BP / beam32), ratios, errors")
-    print(f"{'basis':>5s} {'p':>7s} {'PriorTilt':>11s} {'Relay-BP':>11s} {'beam32':>11s} {'PT/RBP':>7s} {'PT/beam':>8s} {'errors PT/RBP/beam':>20s}")
+    print(f"\n{CODES[name]['title']}: LER per cycle (PriorTilt / Relay-BP / beam search), ratios, logical errors")
+    print(f"{'basis':>5s} {'p':>7s} {'PriorTilt':>11s} {'Relay-BP':>11s} {'beam search':>11s} {'PT/RBP':>7s} {'PT/beam':>8s} {'errors PT/RBP/beam':>20s}")
     piv = df.pivot_table(index=["basis", "p"], columns="decoder", values=["ler_per_cycle", "errors"])
     for (xz, p), row in piv.iterrows():
         pt, rb, bm = (row[("ler_per_cycle", d)] for d in ("PriorTilt_3phase", "RelayBP", "BeamSearch32"))
@@ -284,16 +296,16 @@ def one_point_simulation(
     max_rounds: int = 3000,
     num_workers: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Simulate the memory experiment(s) of `code` at `p_CNOT` with PriorTilt (three-phase mode, the schedule fitted
-    for this point, `max_rounds` tilt rounds; 3000 = paper) until `maximum_errors` logical failures or `maximum_shots`
-    shots per basis, and compare with the paper's values. `basis` is "z" (Z memory), "x" (X memory) or "xz" (both;
-    the x + z sum is what the paper's figure shows). sinter prints its progress (shots and failures collected so far)
-    while the simulation runs.
+    """Simulate the memory experiment(s) of `code` at physical error rate `p_CNOT` with PriorTilt (three-phase mode,
+    the parameters optimized for this point, at most `max_rounds` modified-BP rounds; 3000 = paper) until
+    `maximum_errors` logical errors or `maximum_shots` shots per basis, and compare with the paper's values. `basis`
+    is "z" (Z-memory experiment), "x" (X-memory) or "xz" (both; the sum of the two LERs is what the paper reports).
+    sinter prints its progress (shots and logical errors collected so far) while the simulation runs.
 
     The defaults (BB144, Z memory, p_CNOT = 0.005) take about a minute on a laptop with 11 worker processes (about
-    4,000 shots for 100 failures); basis="xz" doubles that. p_CNOT = 0.004 takes about 3x longer (34,000 shots per
-    basis) and p_CNOT = 0.003 about 6x longer (320,000 shots per basis). The paper's points at p_CNOT = 0.001 needed
-    7-9 x 10^8 shots per basis: see full_simulation for those.
+    4,000 shots for 100 logical errors); basis="xz" doubles that. p_CNOT = 0.004 takes about 3x longer (34,000 shots
+    per basis) and p_CNOT = 0.003 about 6x longer (320,000 shots per basis). The paper's points at p_CNOT = 0.001
+    needed 7-9 x 10^8 shots per basis: see full_simulation for those.
     Returns a DataFrame with one row per basis (shots, errors, seconds, LER per cycle)."""
     name = _code_name(code)
     p = _closest_listed_rate(name, p_CNOT)
@@ -301,10 +313,10 @@ def one_point_simulation(
     if bases is None:
         raise ValueError(f"basis must be 'x', 'z' or 'xz', got {basis!r}")
     rounds = CODES[name]["syndrome_rounds"]
-    dec_name = decoder_name(name, p)
+    dec_name = decoder_name(name, p, max_rounds)
     decoders = {dec_name: priortilt_decoder(name, p, max_rounds=max_rounds)}
-    print(f"PriorTilt three-phase mode on {CODES[name]['title']} at p_CNOT = {p:g} ({max_rounds} rounds)")
-    print(f"  schedule: {tuned_config(name, p, 'three_phase').describe()}")
+    print(f"PriorTilt three-phase mode on {CODES[name]['title']} at p = {p:g} (at most {max_rounds} modified-BP rounds)")
+    print(f"  {tuned_config(name, p).describe()}")
     rows = []
     paper = load_paper_data(name, "PriorTilt_3phase")
     for xz in bases:
@@ -313,7 +325,7 @@ def one_point_simulation(
             num_workers=_num_workers(num_workers),
             max_shots=maximum_shots,
             max_errors=maximum_errors,
-            tasks=[sinter.Task(circuit=load_circuit(name, p, xz), json_metadata=_metadata(name, p, xz))],
+            tasks=[sinter.Task(circuit=load_circuit(name, p, xz), json_metadata=_metadata(name, p, xz, max_rounds))],
             decoders=[dec_name],
             custom_decoders=decoders,
             print_progress=True,
@@ -324,21 +336,39 @@ def one_point_simulation(
         ref_ler = float(ref.ler_per_cycle.iloc[0]) if len(ref) else float("nan")
         rows.append(dict(code=name, basis=xz, p=p, syndrome_rounds=rounds, shots=s.shots, errors=s.errors, seconds=s.seconds,
                          ler_per_cycle=ler, ler_err_1sigma=np.sqrt(max(s.errors, 1)) / s.shots / rounds, paper_ler_per_cycle=ref_ler))
-        print(f"  memory_{xz.upper()}: {s.errors} failures in {s.shots} shots -> LER per cycle {ler:.3e} "
+        print(f"  {xz.upper()}-memory: {s.errors} logical errors in {s.shots} shots -> LER per cycle {ler:.3e} "
               f"(+-{100 / np.sqrt(max(s.errors, 1)):.0f}%); paper: {ref_ler:.3e}; wall time {time.time() - t0:.0f} s")
     df = pd.DataFrame(rows)
     if len(bases) == 2:
-        print(f"  x + z: {df.ler_per_cycle.sum():.3e} (paper: {df.paper_ler_per_cycle.sum():.3e})")
+        print(f"  X + Z (the paper's LER): {df.ler_per_cycle.sum():.3e} (paper: {df.paper_ler_per_cycle.sum():.3e})")
     return df
 
 
-def generate_tasks(code, rates: Optional[Iterable[float]] = None):
-    """sinter tasks of the paper's PriorTilt points for `code`: both bases at every noise rate (or the given rates)."""
+def generate_tasks(code, rates: Optional[Iterable[float]] = None, max_rounds: int = 3000):
+    """sinter tasks of the paper's PriorTilt points for `code`: the X- and Z-memory experiments at every physical error
+    rate (or the given rates)."""
     name = _code_name(code)
     for p in (CODES[name]["rates"] if rates is None else rates):
         p = _closest_listed_rate(name, p)
         for xz in ("x", "z"):
-            yield sinter.Task(circuit=load_circuit(name, p, xz), decoder=decoder_name(name, p), json_metadata=_metadata(name, p, xz))
+            yield sinter.Task(circuit=load_circuit(name, p, xz), decoder=decoder_name(name, p, max_rounds),
+                              json_metadata=_metadata(name, p, xz, max_rounds))
+
+
+def _write_sinter_csv(path: Path, stats: Iterable[sinter.TaskStats]) -> None:
+    """Write task statistics (one row per task) in sinter's CSV format plus a `decoder_params` column holding the
+    PriorTilt configuration of each row. sinter ignores the extra column when it reads the file back."""
+    rows = []
+    for st in sorted(stats, key=lambda t: (t.json_metadata["p_CNOT"], t.json_metadata["x_or_z"], t.decoder)):
+        m = st.json_metadata
+        rows.append(dict(
+            shots=st.shots, errors=st.errors, discards=st.discards, seconds=round(st.seconds, 3), decoder=st.decoder,
+            strong_id=st.strong_id, json_metadata=json.dumps(m, separators=(",", ":"), sort_keys=True),
+            custom_counts=json.dumps(dict(st.custom_counts), separators=(",", ":"), sort_keys=True) if st.custom_counts else "",
+            decoder_params=_params_json(m["code"], m["p_CNOT"], m.get("max_rounds", 3000)),
+        ))
+    pd.DataFrame(rows, columns=["shots", "errors", "discards", "seconds", "decoder", "strong_id", "json_metadata",
+                                "custom_counts", "decoder_params"]).to_csv(path, index=False)
 
 
 def full_simulation(
@@ -349,45 +379,37 @@ def full_simulation(
     num_workers: Optional[int] = None,
     max_rounds: int = 3000,
 ) -> Path:
-    """Re-run the paper's PriorTilt curve for `code`: every noise rate (or `rates`), both bases, until `maximum_errors`
-    failures or `maximum_shots` shots per point. The result is written in sinter CSV format (with the decoder
+    """Re-run the paper's PriorTilt curve for `code`: every physical error rate (or `rates`), X- and Z-memory experiments,
+    until `maximum_errors` logical errors or `maximum_shots` shots per point. The result is written in sinter CSV format (with the decoder
     parameters of each row) to simulation_results/<code>_PriorTilt_3phase.csv and picked up by
     plot_logical_error_rate(code, own_results=True).
 
-    WARNING: this is a very long computation. The paper's points at the lowest noise rates used up to 10^9 shots per
-    basis, i.e. hundreds of CPU-days per code; at the highest rate of each code a point takes minutes. Choose `rates`
+    WARNING: this is a very long computation. The paper's points at the lowest physical error rates used up to 10^9
+    shots per basis, i.e. hundreds of CPU-days per code; at the highest rate of each code a point takes minutes. Choose `rates`
     and `maximum_shots` accordingly. The run is resumable: existing rows of the output file are reused and only the
-    missing shots are collected."""
+    missing shots are collected, also after an interrupted run (its batches are kept in simulation_results/temp_files).
+    A task is identified by (code, p_CNOT, basis, max_rounds): runs with a different `max_rounds` get their own rows."""
     name = _code_name(code)
     final_file = RESULTS_DIR / f"{name}_PriorTilt_3phase.csv"
     temp_file = TEMP_DIR / f"{name}_PriorTilt_3phase.csv"
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    decoders = {decoder_name(name, p): priortilt_decoder(name, p, max_rounds=max_rounds) for p in CODES[name]["rates"]}
-    existing = [str(f) for f in (final_file, temp_file) if f.exists()]
+    decoders = {decoder_name(name, p, max_rounds): priortilt_decoder(name, p, max_rounds=max_rounds) for p in CODES[name]["rates"]}
+    # Completed runs live in final_file (one row per task). An interrupted run left its batches (one row each) in
+    # temp_file; sinter reads that file itself and appends to it when it is passed as save_resume_filepath, so it must
+    # not be listed in existing_data_filepaths as well.
     sinter.collect(
         num_workers=_num_workers(num_workers),
         max_shots=maximum_shots,
         max_errors=maximum_errors,
-        tasks=list(generate_tasks(name, rates)),
+        tasks=list(generate_tasks(name, rates, max_rounds)),
         custom_decoders=decoders,
-        existing_data_filepaths=existing,
+        existing_data_filepaths=[str(final_file)] if final_file.exists() else [],
         save_resume_filepath=str(temp_file),
         print_progress=True,
     )
-    # merge the resume file into the final file, adding the decoder parameters of each row
-    frames = [pd.read_csv(f) for f in (final_file, temp_file) if f.exists()]
-    df = pd.concat(frames, ignore_index=True)
-    df.columns = df.columns.str.strip()
-    if "decoder_params" not in df.columns:
-        df["decoder_params"] = ""
-    df["decoder"] = df["decoder"].str.strip()
-    md = df["json_metadata"].apply(json.loads)
-    df["decoder_params"] = [
-        _params_json(name, m["p_CNOT"], max_rounds) if not isinstance(v, str) or not v.strip() else v
-        for m, v in zip(md, df["decoder_params"])
-    ]
-    df = df.drop_duplicates(subset=["strong_id"] if "strong_id" in df.columns else None)
-    df.to_csv(final_file, index=False)
+    # fold the batches of this run into the previous totals: sinter sums all rows with the same strong_id
+    stats = sinter.read_stats_from_csv_files(*[f for f in (final_file, temp_file) if f.exists()])
+    _write_sinter_csv(final_file, stats)
     if temp_file.exists():
         temp_file.unlink()
     print("->", final_file)
@@ -395,9 +417,9 @@ def full_simulation(
 
 
 def decoding_time(code="BB144", p_CNOT: float = 0.001, num_shots: int = 10_000, max_rounds: int = 3000) -> dict:
-    """Single-thread decoding time of PriorTilt (three-phase mode) on the Z memory experiment: mean and 99th
-    percentile of the per-shot wall time (one decode call per shot) over `num_shots` sampled shots, the two
-    statistics reported in the paper. The 99th percentile rests on num_shots / 100 shots."""
+    """Single-thread decoding time per shot of PriorTilt (three-phase mode) on the Z-memory experiment: mean and 99th
+    percentile over `num_shots` sampled shots (one decode call per shot; a shot comprises all syndrome extraction
+    cycles), the two statistics reported in the paper. The 99th percentile rests on num_shots / 100 shots."""
     name = _code_name(code)
     p = _closest_listed_rate(name, p_CNOT)
     circuit = load_circuit(name, p, "z")
@@ -412,14 +434,15 @@ def decoding_time(code="BB144", p_CNOT: float = 0.001, num_shots: int = 10_000, 
         t[i] = time.perf_counter() - t0
         failures += int(np.any(pred.astype(bool) != obs[i]))
     out = dict(code=name, p=p, shots=num_shots, mean_ms=1e3 * t.mean(), p99_ms=1e3 * np.quantile(t, 0.99), failures=failures)
-    print(f"PriorTilt three-phase on {CODES[name]['title']}, memory_Z, p_CNOT = {p:g}, {num_shots} shots: "
-          f"mean {out['mean_ms']:.3f} ms, 99th percentile {out['p99_ms']:.2f} ms, {failures} logical failures")
+    print(f"PriorTilt three-phase mode on {CODES[name]['title']}, Z-memory experiment, p = {p:g}, {num_shots} shots: "
+          f"mean decoding time {out['mean_ms']:.3f} ms per shot, 99th percentile {out['p99_ms']:.2f} ms, {failures} logical errors")
     return out
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Fraction of bits with a nonzero prior offset per tilt round (the table of the paper's "only a few bits are kicked"
-# paragraph). Measured with the decoder's diagnostic counters (PriorTilt.tilt_statistics).
+# Fraction of nonzero prior offsets (the paper's table of the mean percentage of error nodes satisfying the error-prone
+# condition S_j < theta * Lambda_j per modified-BP round, which bounds the fraction of nonzero prior offsets from
+# above). Measured with the decoder's diagnostic counters (PriorTilt.offset_statistics).
 # ---------------------------------------------------------------------------------------------------------------------
 
 #: Shots per basis used in the paper for the offset-fraction table.
@@ -427,9 +450,11 @@ OFFSET_FRACTION_SHOTS = {0.001: 100_000, 0.002: 30_000}
 
 
 def load_paper_offset_fraction(code=None) -> pd.DataFrame:
-    """The paper's measurement of the fraction of bits with a nonzero prior offset per tilt round (three-phase mode),
-    one row per (code, p_CNOT, basis): shots, shots that reached the tilt phase, tilt rounds, nonzero offsets,
-    offset_fraction = nonzero_offsets / (tilt_rounds * num_error_mechanisms), per-shot 90th percentile and maximum."""
+    """The paper's measurement of the fraction of error-prone nodes per modified-BP round (three-phase mode, standard XZ
+    decoding), one row per (code, p_CNOT, basis): shots, shots still unconverged after the ordinary BP iterations
+    (shots_reaching_modified_bp), modified-BP rounds (rounds), error-prone (node, round) pairs (error_prone_nodes),
+    offset_fraction = error_prone_nodes / (rounds * num_error_mechanisms), per-shot 90th percentile and maximum of the
+    same ratio."""
     df = pd.read_csv(PAPER_DATA_DIR / "offset_fraction.csv")
     if code is not None:
         df = df[df.code == _code_name(code)]
@@ -437,8 +462,8 @@ def load_paper_offset_fraction(code=None) -> pd.DataFrame:
 
 
 def _pooled_offset_fraction(df: pd.DataFrame) -> float:
-    """Numerator and denominator summed over the rows (the paper's table pools the X and Z memory experiments)."""
-    return float(df.nonzero_offsets.sum() / (df.tilt_rounds * df.num_error_mechanisms).sum())
+    """Numerator and denominator summed over the rows (the paper's table pools the X- and Z-memory experiments)."""
+    return float(df.error_prone_nodes.sum() / (df.rounds * df.num_error_mechanisms).sum())
 
 
 def _offset_fraction_worker(args):
@@ -447,19 +472,19 @@ def _offset_fraction_worker(args):
     dec = PriorTilt(circuit.detector_error_model(), code=code, p=p, max_rounds=max_rounds, seed=decoder_seed)
     dets, obs = circuit.compile_detector_sampler(seed=sampler_seed).sample(num_shots, separate_observables=True)
     dets = dets.astype(np.uint8)
-    nonzero = bit_rounds = tilt_rounds = 0
+    error_prone = node_rounds = rounds = 0
     per_shot, failures = [], 0
     for i in range(num_shots):
-        dec.reset_tilt_statistics()
+        dec.reset_offset_statistics()
         pred = dec.decode(dets[i])
-        st = dec.tilt_statistics()
-        if st["bit_rounds"]:  # the shot reached the tilt phase
-            per_shot.append(st["nonzero_offsets"] / st["bit_rounds"])
-            nonzero += st["nonzero_offsets"]
-            bit_rounds += st["bit_rounds"]
-            tilt_rounds += st["tilt_rounds"]
+        st = dec.offset_statistics()
+        if st["node_rounds"]:  # the shot was still unconverged after the ordinary BP iterations
+            per_shot.append(st["error_prone_nodes"] / st["node_rounds"])
+            error_prone += st["error_prone_nodes"]
+            node_rounds += st["node_rounds"]
+            rounds += st["rounds"]
         failures += int(np.any(pred.astype(bool) != obs[i]))
-    return dict(nonzero=nonzero, bit_rounds=bit_rounds, tilt_rounds=tilt_rounds, per_shot=per_shot, failures=failures,
+    return dict(error_prone=error_prone, node_rounds=node_rounds, rounds=rounds, per_shot=per_shot, failures=failures,
                 num_error_mechanisms=dec.num_errors)
 
 
@@ -472,20 +497,23 @@ def offset_fraction(
     max_rounds: int = 3000,
     seed: int = 7,
 ) -> pd.DataFrame:
-    """Measure the fraction of bits (error mechanisms) that receive a nonzero prior offset per tilt round, for PriorTilt
-    in the three-phase mode at (`code`, `p_CNOT`), and compare with the paper's value.
+    """Measure the mean fraction of error nodes (error mechanisms) that satisfy the error-prone condition
+    S_j < theta * Lambda_j per modified-BP round, for PriorTilt in the three-phase mode at (`code`, `p_CNOT`), and
+    compare with the paper's table. Only error-prone nodes can receive a nonzero prior offset, so this fraction bounds
+    the fraction of nonzero prior offsets from above (the paper's "Fraction of nonzero prior offsets" paragraph).
 
     Definition (as in the paper): decode `num_shots` sampled shots per basis (default: the paper's 100,000 at
-    p_CNOT = 0.001 and 30,000 at 0.002). Only shots that are still unconverged after the plain BP phase enter the tilt
-    rounds; at the end of every tilt round the decoder counts the bits whose LLR sum is below threshold_factor x prior,
-    i.e. the bits that get a nonzero offset. offset_fraction = (number of (bit, tilt round) pairs with a nonzero offset)
-    / (number of tilt rounds x number of error mechanisms), summed over all contributing shots, so every tilt round has
-    the same weight. The per-shot columns apply the same ratio to each contributing shot on its own.
+    p_CNOT = 0.001 and 30,000 at 0.002). Shots that converge within the I_0 = 60 ordinary BP iterations do not
+    contribute; for the others the decoder counts, at every round boundary, the nodes satisfying the error-prone
+    condition. offset_fraction = (number of error-prone (node, round) pairs) / (number of modified-BP rounds x number
+    of error nodes N), summed over all contributing shots, so every round has the same weight. The per-shot columns
+    apply the same ratio to each contributing shot on its own.
 
-    Returns one row per basis with the measured and the paper's values; the printed "x + z pooled" value sums numerator
-    and denominator over both bases, which is the number in the paper's table. The shots and the decoder seeds differ
-    from the paper's run, so agreement is statistical (within about 10% for BB144 and BB70; GB102 at p_CNOT = 0.001
-    rests on fewer than 100 contributing shots per basis and fluctuates by about 20%). Runs on `num_workers` processes."""
+    Returns one row per basis with the measured and the paper's values; the printed "X + Z pooled" value sums numerator
+    and denominator over both memory bases, which is the number in the paper's table. The shots and the decoder seeds
+    differ from the paper's run, so agreement is statistical (within about 10% for BB144 and BB70; GB102 at
+    p_CNOT = 0.001 rests on fewer than 100 contributing shots per basis and fluctuates by about 20%). Runs on
+    `num_workers` processes."""
     name = _code_name(code)
     p = _closest_listed_rate(name, p_CNOT)
     bases = {"z": ("z",), "x": ("x",), "xz": ("x", "z"), "zx": ("x", "z")}.get(str(basis).lower())
@@ -494,7 +522,7 @@ def offset_fraction(
     shots = int(num_shots if num_shots is not None else OFFSET_FRACTION_SHOTS.get(p, 30_000))
     workers = _num_workers(num_workers)
     paper = load_paper_offset_fraction(name)
-    print(f"PriorTilt three-phase mode on {CODES[name]['title']} at p_CNOT = {p:g}: {shots} shots per basis, {workers} workers")
+    print(f"PriorTilt three-phase mode on {CODES[name]['title']} at p = {p:g}: {shots} shots per basis, {workers} workers")
     rows = []
     for xz in bases:
         t0 = time.time()
@@ -503,30 +531,30 @@ def offset_fraction(
                  for k, n in enumerate(chunks) if n > 0]
         with multiprocessing.get_context("spawn").Pool(len(tasks)) as pool:
             parts = pool.map(_offset_fraction_worker, tasks)
-        nonzero = sum(r["nonzero"] for r in parts)
-        bit_rounds = sum(r["bit_rounds"] for r in parts)
-        tilt_rounds = sum(r["tilt_rounds"] for r in parts)
+        error_prone = sum(r["error_prone"] for r in parts)
+        node_rounds = sum(r["node_rounds"] for r in parts)
+        rounds = sum(r["rounds"] for r in parts)
         per_shot = np.array(sum((r["per_shot"] for r in parts), []))
         n_err = parts[0]["num_error_mechanisms"]
         ref = paper[(paper.basis == xz) & np.isclose(paper.p, p)]
         rows.append(dict(
             code=name, basis=xz, p=p, syndrome_rounds=CODES[name]["syndrome_rounds"], shots=shots,
-            num_error_mechanisms=n_err, shots_reaching_tilt_phase=len(per_shot), tilt_rounds=tilt_rounds, nonzero_offsets=nonzero,
-            offset_fraction=nonzero / bit_rounds if bit_rounds else float("nan"),
+            num_error_mechanisms=n_err, shots_reaching_modified_bp=len(per_shot), rounds=rounds, error_prone_nodes=error_prone,
+            offset_fraction=error_prone / node_rounds if node_rounds else float("nan"),
             per_shot_p90=float(np.quantile(per_shot, 0.9)) if len(per_shot) else float("nan"),
             per_shot_max=float(per_shot.max()) if len(per_shot) else float("nan"),
             failures=sum(r["failures"] for r in parts),
             paper_offset_fraction=float(ref.offset_fraction.iloc[0]) if len(ref) else float("nan"),
         ))
         r = rows[-1]
-        print(f"  memory_{xz.upper()}: {r['shots_reaching_tilt_phase']} shots reached the tilt phase, {tilt_rounds} tilt rounds, "
-              f"nonzero offsets on {100 * r['offset_fraction']:.3f}% of the {n_err} bits per tilt round "
+        print(f"  {xz.upper()}-memory: {r['shots_reaching_modified_bp']} shots unconverged after ordinary BP, {rounds} modified-BP rounds, "
+              f"{100 * r['offset_fraction']:.3f}% of the {n_err} error nodes error-prone per round "
               f"(paper: {100 * r['paper_offset_fraction']:.3f}%); per-shot 90th pct {100 * r['per_shot_p90']:.2f}%, "
               f"max {100 * r['per_shot_max']:.2f}%; wall time {time.time() - t0:.0f} s")
     df = pd.DataFrame(rows)
     if len(bases) == 2:
         ref = paper[np.isclose(paper.p, p)]
-        print(f"  x + z pooled: {100 * _pooled_offset_fraction(df):.2f}% of bits per tilt round"
+        print(f"  X + Z pooled: {100 * _pooled_offset_fraction(df):.2f}% of the error nodes error-prone per round"
               f" (paper: {100 * _pooled_offset_fraction(ref):.2f}%)")
     return df
 
@@ -537,15 +565,15 @@ def offset_fraction_table(
     num_shots: Optional[int] = None,
     num_workers: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Reproduce the paper's table of the fraction of bits with a nonzero prior offset per tilt round (three-phase
-    mode, X and Z pooled) for the given codes and noise rates; see offset_fraction for the definition and the sample
-    sizes. The default, BB70 at both rates, takes about half a minute on a laptop with 11 worker processes; the
+    """Reproduce the paper's table of the mean percentage of error-prone nodes per modified-BP round (three-phase mode,
+    standard XZ decoding, X- and Z-memory pooled) for the given codes and physical error rates; see offset_fraction for
+    the definition and the sample sizes. The default, BB70 at both rates, takes about half a minute on a laptop with 11 worker processes; the
     paper's full table is codes=("BB144", "BB70", "GB102") and takes about 4x longer. Returns the per-basis rows of
     all cells; prints the pooled table next to the paper's values."""
     frames = [offset_fraction(c, p, num_shots=num_shots, num_workers=num_workers) for c in codes for p in rates]
     df = pd.concat(frames, ignore_index=True)
     paper = load_paper_offset_fraction()
-    print(f"\n{'code (n)':>16s} {'p_CNOT':>7s} {'measured':>9s} {'paper':>7s}   (fraction of bits with a nonzero offset per tilt round, x + z pooled)")
+    print(f"\n{'code (N)':>16s} {'p':>7s} {'measured':>9s} {'paper':>7s}   (mean percentage of error-prone nodes per modified-BP round, X + Z pooled)")
     for (c, p), sub in df.groupby(["code", "p"], sort=False):
         ref = paper[(paper.code == c) & np.isclose(paper.p, p)]
         print(f"{c + ' (' + format(int(sub.num_error_mechanisms.iloc[0]), ',') + ')':>16s} {p:>7g} "
@@ -554,7 +582,7 @@ def offset_fraction_table(
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# XYZ decoding of BB144 at p_CNOT = 0.003 (the paper's correlated-decoding experiment)
+# XYZ decoding of BB144 at p = 0.003
 # ---------------------------------------------------------------------------------------------------------------------
 
 #: The (code, p_CNOT) pairs with XYZ circuits, schedule and stored results.
@@ -571,8 +599,9 @@ def _xyz_case(code, p_CNOT: float):
 
 
 def xyz_circuit_file(basis: str = "z", code="BB144", p_CNOT: float = 0.003) -> Path:
-    """Path of the XYZ-decoding circuit: the memory experiment in `basis` whose detectors after the first round
-    compare all stabiliser measurements (X and Z), so that the decoder sees the full detector error model."""
+    """Path of the XYZ-decoding circuit of the `basis` memory experiment: its detectors after the first cycle compare
+    all stabilizer measurements (X and Z), so that the decoder uses both detector types jointly on the full detector
+    error model."""
     name, p = _xyz_case(code, p_CNOT)
     c = CODES[name]
     if basis not in ("x", "z"):
@@ -585,40 +614,41 @@ def load_xyz_circuit(basis: str = "z", code="BB144", p_CNOT: float = 0.003) -> s
 
 
 def xyz_decoder(code="BB144", p_CNOT: float = 0.003, max_rounds: int = XYZ_MAX_ROUNDS, precision: str = "f64", seed: int = -1) -> SinterDecoder_PriorTilt:
-    """sinter decoder of the paper's XYZ experiment: PriorTilt three-phase mode with the XYZ schedule, one solution,
-    6000 rounds (the paper's setting)."""
+    """sinter decoder of the paper's XYZ decoding: PriorTilt in the three-phase mode with the XYZ schedule and at most
+    R = 6000 modified-BP rounds (the paper's setting), returning the first syndrome-consistent solution."""
     name, p = _xyz_case(code, p_CNOT)
     sched = xyz_schedule(name, p)
     return SinterDecoder_PriorTilt(schedule={"ends": sched["ends"], "phases": sched["phases"]}, max_rounds=max_rounds, precision=precision, seed=seed)
 
 
-def xyz_decoder_name(code="BB144", p_CNOT: float = 0.003) -> str:
-    return f"PriorTilt_3phase_XYZ_{_code_name(code)}_p{p_CNOT:g}"
+def xyz_decoder_name(code="BB144", p_CNOT: float = 0.003, max_rounds: int = XYZ_MAX_ROUNDS) -> str:
+    base = f"PriorTilt_3phase_XYZ_{_code_name(code)}_p{p_CNOT:g}"
+    return base if max_rounds == XYZ_MAX_ROUNDS else f"{base}_r{max_rounds}"
 
 
 def load_paper_xyz(code="BB144", p_CNOT: float = 0.003) -> pd.DataFrame:
     """The paper's XYZ-decoding results (one row per decoder and basis) with the LER per cycle and its 1-sigma error:
-    PriorTilt three-phase (6000 rounds, one solution) and the Relay-BP reference (601 legs, 5 solutions)."""
+    PriorTilt (three-phase mode, R = 6000 rounds) and Relay-BP-5 (601 legs, five syndrome-consistent solutions)."""
     name, p = _xyz_case(code, p_CNOT)
     return load_sinter_csv(PAPER_DATA_DIR / f"{name}_XYZ_p{p:g}.csv")
 
 
 def print_xyz_table(code="BB144", p_CNOT: float = 0.003) -> pd.DataFrame:
-    """Print the paper's XYZ-decoding table: LER per cycle of each decoder for the X and Z memory experiments and
-    their sum, with the failure counts and the PriorTilt / Relay-BP ratio."""
+    """Print the paper's XYZ-decoding table: LER per cycle of each decoder for the X- and Z-memory experiments and
+    their sum (the paper's LER), with the logical error counts and the PriorTilt / Relay-BP-5 ratio."""
     name, p = _xyz_case(code, p_CNOT)
     df = load_paper_xyz(name, p)
     piv = df.pivot_table(index="decoder", columns="basis", values=["ler_per_cycle", "errors", "shots"])
-    print(f"XYZ decoding of {CODES[name]['title']} at p_CNOT = {p:g} (LER per cycle; failures / shots)")
-    print(f"{'decoder':>18s} {'xyz_x':>10s} {'xyz_z':>10s} {'x + z':>10s}   {'failures / shots (x; z)':>40s}")
+    print(f"XYZ decoding of {CODES[name]['title']} at p = {p:g} (LER per cycle; logical errors / shots)")
+    print(f"{'decoder':>18s} {'X-memory':>10s} {'Z-memory':>10s} {'X + Z':>10s}   {'logical errors / shots (X; Z)':>40s}")
     tot = {}
-    for dec in ("PriorTilt_3phase", "RelayBP_5results"):
+    for dec in ("PriorTilt_3phase", "RelayBP-5"):
         lx, lz = piv.loc[dec, ("ler_per_cycle", "xyz_x")], piv.loc[dec, ("ler_per_cycle", "xyz_z")]
         tot[dec] = lx + lz
         fx = f"{int(piv.loc[dec, ('errors', 'xyz_x')])} / {int(piv.loc[dec, ('shots', 'xyz_x')]):,}"
         fz = f"{int(piv.loc[dec, ('errors', 'xyz_z')])} / {int(piv.loc[dec, ('shots', 'xyz_z')]):,}"
-        print(f"{dec:>18s} {lx:>10.2e} {lz:>10.2e} {lx + lz:>10.2e}   {fx + ';  ' + fz:>40s}")
-    print(f"PriorTilt / Relay-BP (5 results): {tot['PriorTilt_3phase'] / tot['RelayBP_5results']:.2f}")
+        print(f"{XYZ_LABELS[dec]:>18s} {lx:>10.2e} {lz:>10.2e} {lx + lz:>10.2e}   {fx + ';  ' + fz:>40s}")
+    print(f"PriorTilt / Relay-BP-5: {tot['PriorTilt_3phase'] / tot['RelayBP-5']:.2f}")
     return df
 
 
@@ -631,30 +661,30 @@ def xyz_one_point_simulation(
     max_rounds: int = XYZ_MAX_ROUNDS,
     num_workers: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Re-simulate the paper's XYZ point with PriorTilt (three-phase mode, XYZ schedule, one solution, 6000 rounds)
-    on the `basis` memory experiment until `maximum_errors` failures or `maximum_shots` shots, and compare with the
-    paper's value.
+    """Re-simulate the paper's XYZ point with PriorTilt (three-phase mode, XYZ schedule, at most R = 6000 modified-BP
+    rounds, first syndrome-consistent solution) on the `basis` memory experiment until `maximum_errors` logical errors
+    or `maximum_shots` shots, and compare with the paper's value.
 
     WARNING: this is NOT a laptop-scale computation. The XYZ detector error model has about 68,000 error mechanisms
     and a shot takes about 0.6 s on a laptop core (2.5 s on the cluster nodes used for the paper); the paper's 100
-    failures needed 1.6 million shots per basis, i.e. hundreds of CPU-hours per basis (9.4 hours on 238 cores for
-    both bases). A laptop can only afford a few thousand shots, which at an LER of 5e-6 per cycle (6e-5 per shot)
-    will most likely see zero failures. Use `maximum_shots` to bound the run."""
+    logical errors needed 1.6 million shots per basis, i.e. hundreds of CPU-hours per basis (9.4 hours on 238 cores
+    for both bases). A laptop can only afford a few thousand shots, which at an LER of 5e-6 per cycle (6e-5 per shot)
+    will most likely see zero logical errors. Use `maximum_shots` to bound the run."""
     name, p = _xyz_case(code, p_CNOT)
     bases = {"z": ("z",), "x": ("x",), "xz": ("x", "z"), "zx": ("x", "z")}.get(str(basis).lower())
     if bases is None:
         raise ValueError(f"basis must be 'x', 'z' or 'xz', got {basis!r}")
     rounds = CODES[name]["syndrome_rounds"]
-    dec_name = xyz_decoder_name(name, p)
+    dec_name = xyz_decoder_name(name, p, max_rounds)
     decoders = {dec_name: xyz_decoder(name, p, max_rounds=max_rounds)}
     sched = xyz_schedule(name, p)
-    print(f"PriorTilt three-phase mode, XYZ decoding of {CODES[name]['title']} at p_CNOT = {p:g} ({max_rounds} rounds)")
-    print(f"  schedule: ends={sched['ends']}, phases={sched['phases']}")
+    print(f"PriorTilt three-phase mode, XYZ decoding of {CODES[name]['title']} at p = {p:g} (at most {max_rounds} modified-BP rounds)")
+    print(f"  phase boundaries (b1, b2) = {sched['ends']}, parameters per phase (prob_positive, pos_coef, neg_coef, threshold_factor) = {sched['phases']}")
     paper = load_paper_xyz(name, p)
     rows = []
     for xz in bases:
         t0 = time.time()
-        md = {"code": name, "p_CNOT": p, "x_or_z": f"xyz_{xz}", "syndrome_rounds": rounds, "experiment": "xyz"}
+        md = {"code": name, "p_CNOT": p, "x_or_z": f"xyz_{xz}", "syndrome_rounds": rounds, "experiment": "xyz", "max_rounds": max_rounds}
         stats = sinter.collect(
             num_workers=_num_workers(num_workers), max_shots=maximum_shots, max_errors=maximum_errors,
             tasks=[sinter.Task(circuit=load_xyz_circuit(xz, name, p), json_metadata=md)],
@@ -666,6 +696,6 @@ def xyz_one_point_simulation(
         ref_ler = float(ref.ler_per_cycle.iloc[0]) if len(ref) else float("nan")
         rows.append(dict(code=name, basis=f"xyz_{xz}", p=p, syndrome_rounds=rounds, shots=s.shots, errors=s.errors, seconds=s.seconds,
                          ler_per_cycle=ler, ler_err_1sigma=np.sqrt(max(s.errors, 1)) / s.shots / rounds, paper_ler_per_cycle=ref_ler))
-        print(f"  xyz_{xz}: {s.errors} failures in {s.shots} shots -> LER per cycle {ler:.3e}; paper: {ref_ler:.3e}; "
+        print(f"  {xz.upper()}-memory (XYZ): {s.errors} logical errors in {s.shots} shots -> LER per cycle {ler:.3e}; paper: {ref_ler:.3e}; "
               f"wall time {time.time() - t0:.0f} s")
     return pd.DataFrame(rows)

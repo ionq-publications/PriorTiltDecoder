@@ -10,7 +10,7 @@
 
 """sinter wrapper for the PriorTilt decoder.
 
-The optimised parameters depend on the code and on the physical error rate, and sinter hands the decoder only the
+The optimized parameters depend on the code and on the physical error rate, and sinter hands the decoder only the
 detector error model, so one wrapper is configured per (code, p)::
 
     import sinter
@@ -52,11 +52,6 @@ class SinterDecoder_PriorTilt(Decoder):
         *,
         code: Optional[Union[str, int]] = None,
         p: Optional[float] = None,
-        mode: str = "auto",
-        prob_positive: Optional[float] = None,
-        pos_coef: Optional[float] = None,
-        neg_coef: Optional[float] = None,
-        threshold_factor: Optional[float] = None,
         schedule: Optional[Dict[str, object]] = None,
         max_rounds: int = 3000,
         initial_iters: int = 60,
@@ -69,11 +64,6 @@ class SinterDecoder_PriorTilt(Decoder):
         self.kwargs = dict(
             code=code,
             p=p,
-            mode=mode,
-            prob_positive=prob_positive,
-            pos_coef=pos_coef,
-            neg_coef=neg_coef,
-            threshold_factor=threshold_factor,
             schedule=schedule,
             max_rounds=max_rounds,
             initial_iters=initial_iters,
@@ -81,16 +71,7 @@ class SinterDecoder_PriorTilt(Decoder):
             seed=seed,
             precision=precision,
         )
-        explicit = {
-            k: v
-            for k, v in dict(
-                prob_positive=prob_positive, pos_coef=pos_coef, neg_coef=neg_coef, threshold_factor=threshold_factor
-            ).items()
-            if v is not None
-        }
-        self.config = PriorTilt._resolve_config(
-            code, p, mode, explicit, schedule, max_rounds=max_rounds, initial_iters=initial_iters, round_len=round_len
-        )
+        self.config = PriorTilt._resolve_config(code, p, schedule, max_rounds=max_rounds, initial_iters=initial_iters, round_len=round_len)
 
     def _make(self, dem: stim.DetectorErrorModel) -> PriorTilt:
         return PriorTilt(dem, **self.kwargs)
