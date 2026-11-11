@@ -1,8 +1,8 @@
 # PriorTilt Decoder for Quantum LDPC Codes
 
 This repository contains the data and the source code required to reproduce the simulation results presented in the paper
-**PriorTilt: Decoding quantum LDPC codes with sparse perturbations of belief propagation priors**
-by Min Ye and Nicolas Delfosse (IonQ, 2026; arXiv number to be added).
+**[PriorTilt: Decoding quantum LDPC codes with sparse perturbations of belief propagation priors](https://arxiv.org/abs/2611.13373)**
+by Min Ye and Nicolas Delfosse (IonQ, 2026).
 
 PriorTilt is a variant of min-sum belief propagation (BP) that perturbs a small fraction of the prior log-likelihood ratios
 (LLRs) while leaving the message-passing rules unchanged. After up to 60 ordinary BP iterations the decoder continues, without
@@ -136,7 +136,7 @@ If you use this code in your research, please cite our paper:
       title={PriorTilt: Decoding quantum LDPC codes with sparse perturbations of belief propagation priors},
       author={Ye, Min and Delfosse, Nicolas},
       year={2026},
-      journal={arXiv preprint}
+      journal={arXiv preprint arXiv:2611.13373}
 }
 ```
 
